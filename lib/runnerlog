@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""
+runnerlog - author-facing CLI for emitting ::run:: protocol events.
+
+Thin shim that locates runner_core.py and dispatches the `emit` subcommand.
+Centralizes JSON serialization so bash/python/cli all produce identical wire
+output.
+
+Usage:
+    runnerlog section_start <name>
+    runnerlog section_end   <name> ok|failed [exit=N] [reason="..."]
+    runnerlog event         "<message>" [key=value ...]
+    runnerlog metric        key=value [key=value ...]
+    runnerlog fail          "<message>"
+
+Run `runnerlog --help` to see the wrapped argument doc.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+# Locate runner_core.py. We're at <install>/lib/runnerlog; core is at
+# <install>/core/runner_core.py.
+HERE = Path(__file__).resolve().parent
+CORE = HERE.parent / "core" / "runner_core.py"
+
+if not CORE.exists():
+    sys.stderr.write(
+        f"runnerlog: cannot find runner_core.py at {CORE}\n"
+        f"          install layout broken; expected runner_core.py one dir up\n"
+    )
+    sys.exit(2)
+
+# Inject core dir into sys.path and dispatch to emit
+sys.path.insert(0, str(CORE.parent))
+from runner_core import main as _core_main
+
+# Forward as: runner emit <verb> <args...>
+forwarded = ["emit"] + sys.argv[1:]
+sys.exit(_core_main(forwarded))

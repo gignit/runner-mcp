@@ -1,0 +1,22 @@
+# Build artifacts
+/bin/
+/dist/
+/mcp/dist/
+/mcp/node_modules/
+
+# Go test binaries
+/tui/*.test
+# Stray `go build` output inside tui/ (module is named runner-mcp, so a
+# bare `go build` drops a runner-mcp binary here). The real TUI build goes
+# to bin/runner-cli via the Makefile.
+/tui/runner-mcp
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Runner working data (if the repo itself is used as a project)
+/.runner/
+
+# OS junk
+.DS_Store
