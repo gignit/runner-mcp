@@ -1,0 +1,18 @@
+# Build artifacts
+/bin/
+/dist/
+/mcp/dist/
+/mcp/node_modules/
+
+# Go test binaries
+/tui/*.test
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Runner working data (if the repo itself is used as a project)
+/.runner/
+
+# OS junk
+.DS_Store
