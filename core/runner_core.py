@@ -4547,7 +4547,16 @@ def cmd_guide(args: argparse.Namespace) -> int:
     except OSError as e:
         print(json.dumps({"error": f"failed to read guide: {e}"}), file=sys.stderr)
         return 1
+    # On Windows the guide carries its Windows section (shell, detach modes,
+    # kill, capture, helpers): the facts that differ from macOS/Linux.
+    win_path = install_root / "docs" / "GUIDE-WINDOWS.md"
+    if IS_WINDOWS and win_path.exists():
+        try:
+            content = content.rstrip() + "\n\n" + win_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
     # Print the markdown directly. The MCP server wraps it in tool-text.
+    sys.stdout.reconfigure(encoding="utf-8")
     print(content)
     return 0
 
@@ -4580,9 +4589,32 @@ def cmd_helpers(args: argparse.Namespace) -> int:
         },
         "guide": str(install_root / "docs" / "GUIDE.md"),
     }
+    if IS_WINDOWS:
+        # Git Bash sources the same runnerlog.sh; PowerShell and cmd scripts
+        # call runnerlog.cmd (on PATH after install.ps1).
+        response["bash"]["sourceLine"] = f'source "{(lib / "runnerlog.sh").as_posix()}"'
+        response["bash"]["snippet"] = _BASH_SNIPPET.replace("@LIB_SH@", (lib / "runnerlog.sh").as_posix())
+        response["cli"]["absolutePath"] = str(lib / "runnerlog.cmd")
+        response["cli"]["note"] = "On PATH after install.ps1 (runnerlog.cmd in %LOCALAPPDATA%\\runner-mcp\\bin)."
+        response["powershell"] = {
+            "command": "runnerlog",
+            "absolutePath": str(lib / "runnerlog.cmd"),
+            "snippet": _POWERSHELL_SNIPPET,
+        }
+        response["windowsGuide"] = str(install_root / "docs" / "GUIDE-WINDOWS.md")
     print(json.dumps(response, indent=2 if args.pretty else None))
     return 0
 
+
+_POWERSHELL_SNIPPET = '''\
+# PowerShell (Windows): runnerlog.cmd is on PATH after install.ps1.
+runnerlog section_start build
+dotnet build
+runnerlog section_end build $(if ($LASTEXITCODE -eq 0) { "ok" } else { "failed" }) "exit=$LASTEXITCODE"
+runnerlog metric files=42
+runnerlog event "build finished"
+# Run it: runner_start { cmd: "powershell -NoProfile -ExecutionPolicy Bypass -File .runner/scripts/task.ps1" }
+'''
 
 _BASH_SNIPPET = '''\
 # Source once at the top of your script:
