@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"sort"
@@ -2468,7 +2467,7 @@ func renderGrepMatch(match grepMatch) []string {
 }
 
 func (r runnerClient) execJSON(args ...string) ([]byte, error) {
-	cmd := exec.Command("python3", append([]string{r.corePath}, args...)...)
+	cmd := coreCommand(r.corePath, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -2506,10 +2505,7 @@ func findCorePath() (string, error) {
 
 	// XDG data dir (honors $XDG_DATA_HOME), where the installer places the
 	// payload: <dataHome>/runner-mcp/core/runner_core.py
-	dataHome := os.Getenv("XDG_DATA_HOME")
-	if dataHome == "" && home != "" {
-		dataHome = filepath.Join(home, ".local", "share")
-	}
+	dataHome := dataHome(home)
 
 	candidates := []string{
 		filepath.Clean(filepath.Join(exeDir, "..", "core", "runner_core.py")),

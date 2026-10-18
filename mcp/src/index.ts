@@ -62,9 +62,10 @@ import {
   ReadResourceRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { existsSync, readFileSync, appendFileSync, mkdirSync } from "fs";
 import { join, resolve } from "path";
+import { fileURLToPath } from "url";
 import { homedir } from "os";
 
 // ---------------------------------------------------------------------------
@@ -73,13 +74,21 @@ import { homedir } from "os";
 
 // The XDG data directory where the installer lays down the payload:
 //   $XDG_DATA_HOME/runner-mcp/  (default ~/.local/share/runner-mcp/ on
-//   Linux and macOS). We honor $XDG_DATA_HOME when set so the path is
-//   relocatable, matching modern CLI conventions.
+//   every platform, Windows included: the Microsoft Store Python virtualizes
+//   %LOCALAPPDATA%, so it would not see an install there). We honor
+//   $XDG_DATA_HOME when set so the path is relocatable, matching modern CLI
+//   conventions. runner_core.py and runner-cli resolve the same path.
+const IS_WINDOWS = process.platform === "win32";
+
 function xdgDataHome(): string {
   const x = process.env.XDG_DATA_HOME;
   if (x && x.trim()) return x;
   return join(homedir(), ".local", "share");
 }
+
+// This file's path (fileURLToPath, not URL.pathname: on Windows the
+// pathname is "/D:/..." and resolves to a bogus path).
+const HERE = fileURLToPath(import.meta.url); // .../mcp/dist/index.js
 
 const DATA_DIR = join(xdgDataHome(), "runner-mcp");
 
@@ -89,7 +98,7 @@ const DATA_DIR = join(xdgDataHome(), "runner-mcp");
 //   2. dev layout: relative to this file in the source tree
 //   3. an explicit override via $RUNNER_MCP_HOME (points at an install root)
 function findCorePath(): string {
-  const here = new URL(import.meta.url).pathname; // .../mcp/dist/index.js
+  const here = HERE;
   const candidates: string[] = [];
   const override = process.env.RUNNER_MCP_HOME;
   if (override && override.trim()) {
@@ -107,6 +116,38 @@ function findCorePath(): string {
 }
 
 const CORE_PATH = findCorePath();
+
+// The Python 3 that runs the core. `python3` is right on macOS/Linux; on
+// Windows it is often missing or the Microsoft Store stub, so resolve:
+//   1. $RUNNER_PYTHON (an absolute path or a command)
+//   2. <install>/python.path, written by install.ps1 (the interpreter it
+//      verified at install time)
+//   3. python3, python, py -3 -- the first that really is Python 3
+function findPython(): string[] {
+  const env = process.env.RUNNER_PYTHON;
+  if (env && env.trim()) return [env.trim()];
+  const recorded = join(resolve(CORE_PATH, "..", ".."), "python.path");
+  if (existsSync(recorded)) {
+    const p = readFileSync(recorded, "utf-8").trim();
+    if (p && existsSync(p)) return [p];
+  }
+  if (!IS_WINDOWS) return ["python3"];
+  for (const cand of [["python3"], ["python"], ["py", "-3"]]) {
+    try {
+      const r = spawnSync(cand[0], [...cand.slice(1), "--version"], {
+        encoding: "utf-8",
+        windowsHide: true,
+        timeout: 10000,
+      });
+      if (r.status === 0 && /Python 3\./.test(`${r.stdout}${r.stderr}`)) return cand;
+    } catch {
+      // try the next candidate
+    }
+  }
+  return ["python"];
+}
+
+const PYTHON = findPython();
 
 // ---------------------------------------------------------------------------
 // CLI invocation
@@ -159,8 +200,9 @@ function execCore(args: string[]): Promise<ExecResult> {
   return new Promise((resolveExec, rejectExec) => {
     const t0 = Date.now();
     dlog("execCore.spawn", { args });
-    const proc = spawn("python3", [CORE_PATH, ...args], {
+    const proc = spawn(PYTHON[0], [...PYTHON.slice(1), CORE_PATH, ...args], {
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
     let stdout = "";
     let stderr = "";
@@ -674,15 +716,20 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({
 server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   if (request.params.uri === "runner://guide") {
     // Locate GUIDE.md alongside the install
-    const guideCandidates = [
-      join(DATA_DIR, "docs", "GUIDE.md"),                                  // installed payload
-      resolve(new URL(import.meta.url).pathname, "../../../docs/GUIDE.md"), // dev from mcp/dist/
-      resolve(new URL(import.meta.url).pathname, "../../docs/GUIDE.md"),    // dev from mcp/src/
+    const docsCandidates = [
+      join(DATA_DIR, "docs"),            // installed payload
+      resolve(HERE, "../../../docs"),    // dev from mcp/dist/
+      resolve(HERE, "../../docs"),       // dev from mcp/src/
     ];
-    for (const p of guideCandidates) {
+    for (const d of docsCandidates) {
+      const p = join(d, "GUIDE.md");
       if (existsSync(p)) {
+        let text = readFileSync(p, "utf-8");
+        // On Windows the guide carries its Windows section, as runner_guide does.
+        const win = join(d, "GUIDE-WINDOWS.md");
+        if (IS_WINDOWS && existsSync(win)) text += "\n\n" + readFileSync(win, "utf-8");
         return {
-          contents: [{ uri: request.params.uri, mimeType: "text/markdown", text: readFileSync(p, "utf-8") }],
+          contents: [{ uri: request.params.uri, mimeType: "text/markdown", text }],
         };
       }
     }

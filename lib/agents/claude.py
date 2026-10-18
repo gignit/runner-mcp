@@ -40,6 +40,7 @@ from typing import Any
 from .opencode import (
     _current_turn_byte_bounds,
     _output_line_count,
+    _sh_path,
     _sh_quote,
     _summarize_tool_input,
     _tool_one_liner,
@@ -214,8 +215,8 @@ def build_cmd(prompt_path: Path, session_id: str | None, model: str | None = Non
     session_flag = f" --session {_sh_quote(session_id)}" if session_id else ""
     model_flag = f" --model {_sh_quote(model)}" if model else ""
     return (
-        f"node {_sh_quote(str(_RUNNER_SCRIPT))} "
-        f"--prompt-file {_sh_quote(str(prompt_path))}"
+        f"node {_sh_path(_RUNNER_SCRIPT)} "
+        f"--prompt-file {_sh_path(prompt_path)}"
         f"{session_flag}{model_flag}"
     )
 

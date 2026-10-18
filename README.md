@@ -31,7 +31,7 @@ allowing the agent to act as lead engineer overseeing an implementation,
 **multi-turn peer-review or collaboration** or single one-n-done tasks as well. 
 
 Works with **opencode, Claude Code, Codex, Grok, and VS Code / Cursor** on
-**macOS and Linux**.
+**macOS, Linux, and Windows 10/11**.
 
 ## TUI interface (`runner-cli`)
 
@@ -111,11 +111,19 @@ runner-cli
 
 ## Install
 
+macOS and Linux:
+
 ```sh
 curl -fsSL https://github.com/gignit/runner-mcp/releases/latest/download/install.sh | sh
 ```
 
-That one line is the supported install method. The installer:
+Windows 10/11 (PowerShell): see [Windows](#windows-1011) below.
+
+```powershell
+irm https://github.com/gignit/runner-mcp/releases/latest/download/install.ps1 | iex
+```
+
+Those one-liners are the supported install methods. The macOS/Linux installer:
 
 1. Detects your OS + architecture (macOS/Linux, amd64/arm64) and downloads
    the matching release tarball from GitHub Releases (checksum-verified).
@@ -138,6 +146,65 @@ curl -fsSL https://github.com/gignit/runner-mcp/releases/download/v0.1.0/install
 After installing, **restart your agent** so it loads the MCP server. Each
 tool's description is self-sufficient -- the agent doesn't need to call
 `runner_guide` first.
+
+### Windows (10/11)
+
+From PowerShell (Windows PowerShell 5.1 or PowerShell 7, no admin needed):
+
+```powershell
+irm https://github.com/gignit/runner-mcp/releases/latest/download/install.ps1 | iex
+```
+
+**Requirements:** `node` (18+) and Python 3 on `PATH`. **Git for Windows** is
+strongly recommended: its Git Bash runs your commands, so the command gating,
+`.runner/scripts/*.sh` and `runnerlog.sh` behave exactly as on macOS/Linux.
+Without it, commands run under PowerShell. Missing anything?
+`winget install OpenJS.NodeJS.LTS`, `winget install Python.Python.3.12`,
+`winget install Git.Git`.
+
+The installer:
+
+1. Detects the architecture (amd64/arm64) and downloads
+   `runner-mcp-<version>-windows-<arch>.zip` from GitHub Releases
+   (checksum-verified against `SHA256SUMS`).
+2. Installs the payload to `~\.local\share\runner-mcp`, the same layout as
+   macOS/Linux. Not `%LOCALAPPDATA%`: the Microsoft Store Python virtualizes
+   AppData and would not see files put there. Upgrades replace only the
+   payload folders, so the global run index survives.
+3. Records the Python 3 it verified in `python.path` (on Windows `python3` is
+   often the Microsoft Store stub; the MCP server and `runner-cli` use the
+   recorded interpreter).
+4. Copies `runner-cli.exe` and a `runnerlog.cmd` shim to `~\.local\bin` (where
+   Claude Code's own Windows installer puts `claude.exe`) and adds it to the
+   user `PATH` if it isn't there.
+5. Registers the MCP server with every supported agent it finds, with the same
+   add-if-missing, repair-if-dead policy as `install.sh`: **Claude Code** (via
+   `claude mcp add -s user`, or `~\.claude.json` directly when only the desktop
+   app is installed), **Codex**, **opencode**, **Grok**, and **VS Code /
+   Insiders / Cursor**. Config files are edited with `node`, so `jq` is not
+   needed.
+
+Then **restart your agent**, and ask it to "use runner guide": on Windows the
+guide carries a Windows section (which shell runs commands, detach and kill,
+output capture, `runnerlog` from PowerShell).
+
+Pin a version:
+
+```powershell
+$env:RUNNER_MCP_VERSION = "0.1.0"; irm https://github.com/gignit/runner-mcp/releases/download/v0.1.0/install.ps1 | iex
+```
+
+Uninstall (a dry run that lists what it would remove; add `-Yes` to remove):
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/gignit/runner-mcp/releases/latest/download/install.ps1))) -Uninstall
+& ([scriptblock]::Create((irm https://github.com/gignit/runner-mcp/releases/latest/download/install.ps1))) -Uninstall -Yes
+```
+
+It removes the payload dir, `runner-cli.exe` / `runnerlog.cmd` from
+`~\.local\bin` (only if they are this install's), `~\.local\bin` from `PATH`
+(only if the installer added it), and the `runner` registration from every
+agent. Per-project `.runner\` run data is never touched.
 
 ### Uninstall
 
@@ -169,7 +236,15 @@ fall back to `~/.local/share/runner-mcp`.)
 ```sh
 make build      # compile for this machine (mcp/dist + bin/runner-cli)
 make install    # build, stage a local tarball, run install.sh against it
-make release    # cross-compile all targets + publish a GitHub Release
+make release    # cross-compile all targets (Windows zips included) + publish a GitHub Release
+```
+
+On Windows (needs Go, Node, Python 3; no `make`):
+
+```powershell
+.\build.ps1            # compile (mcp\dist + bin\runner-cli.exe)
+.\build.ps1 -Stage     # ...and stage dist\runner-mcp-<ver>-windows-{amd64,arm64}.zip + SHA256SUMS
+.\build.ps1 -Install   # stage, then run install.ps1 against the local dist
 ```
 
 ---
@@ -330,7 +405,7 @@ these backends in workspaces you trust.**
 | `runner_section` | Drill into one section's structured detail. For go-test runs each section is a package; passing tests are filtered by default (verbose:true to see all). |
 | `runner_grep` | Regex search over `stdout.log` + `stderr.log` with line numbers and `-A`/`-B` context. |
 | `runner_list` | Scoreboard of all runs (global runId index). Each entry: `state`, `lastLine`, `lastLineAgeSec`, `restartCount`, `stderrCount`, `endpoints`. Filters: `state`, `name` (regex/substring). |
-| `runner_kill` | SIGKILL the run's process group. |
+| `runner_kill` | SIGKILL the run's process group (on Windows: terminate the run's Job Object, i.e. the whole process tree). |
 | `runner_purge` | Remove run directories with a structured report. No args = all terminal runs in your project root. `result: "success"`/`"failed"` filters by outcome. `olderThan: N` filters by age. `runId` removes one. Active runs are never purged and are reported in `kept.active`. |
 | `research_and_code_assistant_agent` | Delegate to a peer agent and hold a multi-turn conversation. `ask` (new conversation) -> `runId`; pass `runId` + `ask` to continue the same conversation; pass `runId` alone to poll for the reply. `blocking: false` to dispatch in the background. Runs in the same project with the same file access. `agent: "opencode"` (default), `"claude"`, or `"codex"` picks the backend. |
 
@@ -390,6 +465,23 @@ Each run dir contains:
   markers AND fed through registered output adapters)
 - `stderr.log` -- raw stderr
 - `tracker.json` -- per-agent delta cursors
+
+### Windows process model
+
+Windows has no `fork`, `setsid`, process groups, or pty pairs, and agent hosts
+put their children in a kill-on-close Job Object, so a plainly spawned run would
+die with the session. `core/runner_win.py` supplies the equivalents:
+
+| macOS / Linux | Windows |
+|---|---|
+| double fork + `setsid` | a detached supervisor (`runner_core.py _supervise`) started with `CREATE_BREAKAWAY_FROM_JOB`; if the agent's job forbids breakaway, created through WMI instead (always outside the caller's job). `meta.json` `detach` records which: `breakaway` / `free` / `wmi` / `job-bound` |
+| `killpg(SIGKILL)` | the supervisor joins a per-run named Job Object before spawning, so `runner_kill` / `runner_restart` end the whole tree with `TerminateJobObject` (`taskkill /T` as fallback) |
+| `kill(pid, 0)` liveness | `OpenProcess` + `GetExitCodeProcess` plus the process creation time (`os.kill(pid, 0)` *terminates* a process on Windows) |
+| two ptys (live, separate streams) | two pipes pumped by threads; `PYTHONUNBUFFERED=1` and `COLUMNS=200` are set. Some native C tools buffer on a pipe and report in bursts |
+| `/bin/bash` | Git Bash (never WSL's `System32\bash.exe`); `RUNNER_SHELL=pwsh\|powershell\|cmd` to override |
+
+Run storage, the global index, the response shapes and every tool are the same
+as on macOS/Linux.
 
 ### MCP server
 
@@ -499,7 +591,11 @@ logged real errors.
 | `result: "success"` but build broke | Check `warnings` field. Many shell scripts exit 0 while logging errors. |
 | `runner-cli` / `runnerlog: command not found` | `~/.local/bin` not on `$PATH`. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell rc. |
 | Installer says `node` / `python3` missing | Install Node and Python 3, then re-run the installer. Both are runtime requirements. |
-| Agent doesn't auto-register | The installer auto-registers with opencode/Claude/Codex/Grok/VS Code only if their config/CLI is present. opencode and VS Code auto-registration also need `jq`. |
+| Agent doesn't auto-register | The installer auto-registers with opencode/Claude/Codex/Grok/VS Code only if their config/CLI is present. opencode and VS Code auto-registration also need `jq` (not on Windows: `install.ps1` uses `node`). |
+| Windows: `runner-cli` / `runnerlog` not found | `~\.local\bin` was just added to the user `PATH`: open a new terminal (or restart the agent). |
+| Windows: `runner_core.py: No such file or directory` | A runner install under `%LOCALAPPDATA%` and the Microsoft Store Python (it virtualizes AppData). Re-run `install.ps1`, which installs to `~\.local\share`. |
+| Windows: runs die when the agent stops | Check `detach` in the run's `meta.json`. `job-bound` means the agent's Job Object allowed neither breakaway nor WMI; start long-lived services from a terminal instead. |
+| Windows: commands run under PowerShell, not bash | Git for Windows isn't installed (or not found). `winget install Git.Git`, or point `RUNNER_GIT_BASH` at `bash.exe`. |
 
 ---
 
@@ -508,22 +604,30 @@ logged real errors.
 ```
 runner-mcp/
   install.sh                # the installer (curl | sh)
+  install.ps1               # the Windows installer (irm | iex)
   Makefile                  # build / install / release
+  build.ps1                 # build / stage / install on Windows
   VERSION                   # single source of truth for the version
   LICENSE                   # AGPL-3.0-or-later
   README.md                 # this file
   core/
     runner_core.py          # core implementation: CLI, adapters, library
+    runner_win.py           # Windows process model (supervisor, Job Object, pipes)
   lib/
     runnerlog               # author-facing CLI shim (Python)
     runnerlog.sh            # bash sourceable helpers
     runnerlog.py            # python module + context manager
+    runnerlog.cmd           # Windows CLI shim (cmd.exe / PowerShell)
   mcp/
     src/index.ts            # MCP server (stdio transport)
     package.json
     tsconfig.json
   docs/
     GUIDE.md                # agent-facing guide (served by runner_guide)
+    GUIDE-WINDOWS.md        # its Windows section (added by runner_guide on Windows)
+  tests/
+    mcp_stdio_smoke.mjs     # end-to-end MCP test against an installed server
+    win_detach_harness.py   # Windows: start a run from inside a kill-on-close job
   tui/
     main.go                 # runner-cli TUI (live run dashboard)
 ```

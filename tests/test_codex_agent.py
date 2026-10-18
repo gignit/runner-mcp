@@ -157,6 +157,27 @@ class CodexEventTests(unittest.TestCase):
         self.assertEqual(view["interrupted"]["code"], "BackendStderr")
         self.assertIn("command not found", view["interrupted"]["reason"])
 
+    def test_codex_log_line_is_not_an_interrupt(self) -> None:
+        # A connector that needs a login makes Codex log an ERROR line and
+        # carry on; the turn must not be treated as failed.
+        log = (
+            "2026-10-18T16:14:13.322584Z ERROR rmcp::transport::worker: worker quit "
+            "with fatal: Transport channel closed, when AuthRequired(AuthRequiredError "
+            "{ www_authenticate_header: \"Bearer resource_metadata=...\" })"
+        )
+        (self.rdir / "stderr.log").write_text(
+            json.dumps({"type": "thread.started", "thread_id": SESSION_ID}) + "\n"
+            + log + "\n"
+            + json.dumps({"type": "turn.started"}) + "\n",
+            encoding="utf-8",
+        )
+        # runner's blocking poll peeks with terminal=True and kills the run on
+        # an interrupt, so check that shape.
+        view = codex.compact_view(self.rdir, terminal=True, started_at=None)
+        self.assertIsNone(view["interrupted"])
+        progress = codex.live_progress(self.rdir, started_at=None)
+        self.assertIn("AuthRequired", " ".join(progress["backendErrors"] or []))
+
     def test_current_turn_cursor_excludes_prior_reply(self) -> None:
         first = [
             {"type": "thread.started", "thread_id": SESSION_ID},
