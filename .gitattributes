@@ -1,0 +1,7 @@
+# LF everywhere, on every platform: the shell helpers (runnerlog.sh,
+# install.sh) break under bash with CRLF, and the Windows payload ships
+# them for Git Bash. The PowerShell and cmd scripts keep CRLF.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.webp binary

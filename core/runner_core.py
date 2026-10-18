@@ -38,20 +38,28 @@ import importlib
 import itertools
 import json
 import os
-import pty
 import re
-import select
 import shlex
 import signal
 import struct
 import subprocess
 import sys
-import termios
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+IS_WINDOWS = os.name == "nt"
+if IS_WINDOWS:
+    # The Windows process model (detached supervisor, Job Object kill, pipe
+    # capture, Git Bash) lives in runner_win.py next to this file.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import runner_win as _win
+else:
+    import pty
+    import select
+    import termios
 
 # Agent runtimes live alongside the other helpers in <install_root>/lib/agents.
 # Loaded lazily so the rest of runner is unaffected if the package is missing
@@ -90,13 +98,19 @@ WIRE_PREFIX = "::run:: "
 #
 # The global fallback (used when the cwd is not inside a git repo) follows
 # the XDG Base Directory spec: $XDG_DATA_HOME/runner-mcp, defaulting to
-# ~/.local/share/runner-mcp on Linux and macOS.
+# ~/.local/share/runner-mcp on Linux and macOS, %LOCALAPPDATA%/runner-mcp
+# on Windows (XDG_DATA_HOME still wins when set).
 RUNNER_DIRNAME = ".runner"
 
 
 def _xdg_data_home() -> Path:
     x = os.environ.get("XDG_DATA_HOME", "").strip()
-    return Path(x) if x else (Path.home() / ".local" / "share")
+    if x:
+        return Path(x)
+    if IS_WINDOWS:
+        la = os.environ.get("LOCALAPPDATA", "").strip()
+        return Path(la) if la else (Path.home() / "AppData" / "Local")
+    return Path.home() / ".local" / "share"
 
 
 RUNNER_GLOBAL = _xdg_data_home() / "runner-mcp"
@@ -319,16 +333,31 @@ def _is_runner_run_id(s: str) -> bool:
 
 def _atomic_write_json(path: Path, data: Any) -> None:
     """Write JSON atomically: temp file then rename."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
+    # On Windows the rename fails while another process has the target open
+    # (a status poll reading meta.json); that lasts milliseconds, so retry.
+    for attempt in range(50):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            if not IS_WINDOWS or attempt == 49:
+                raise
+            time.sleep(0.02)
 
 
 def _read_json(path: Path, default: Any = None) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
+    for attempt in range(25):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return default
+        except PermissionError:
+            if not IS_WINDOWS or attempt == 24:
+                return default
+            time.sleep(0.02)
+    return default
 
 
 # -----------------------------------------------------------------------------
@@ -499,6 +528,9 @@ def _spawn_into(rdir: Path, cmd: str, cwd: str | None, name: str, run_id: str) -
     # resolve this run without knowing the original cwd.
     _index_register(run_id, rdir)
 
+    if IS_WINDOWS:
+        return _spawn_into_windows(rdir, cmd, cwd, name, run_id)
+
     # Double-fork to detach
     if os.fork() > 0:
         # Parent: wait briefly for child to write PID so we can return it.
@@ -616,8 +648,18 @@ def _spawn_into(rdir: Path, cmd: str, cwd: str | None, name: str, run_id: str) -
         pass
 
     rc = proc.wait()
+    _finalize_run(meta_path, stdout_path, rc, meta)
+    os._exit(0)
+
+
+def _finalize_run(meta_path: Path, stdout_path: Path, rc: int, meta: dict[str, Any]) -> None:
+    """Record a finished run: exit code, end time, and success/failed result
+    (failed on a non-zero exit, a failed section, or a section left open)."""
     ended_at = int(time.time())
     meta = _read_json(meta_path) or meta
+    if meta.get("killedAt"):
+        # runner_kill already recorded this run's end; keep its record.
+        return
     meta["endedAt"] = ended_at
     meta["exitCode"] = rc
     meta["state"] = "exited"
@@ -636,7 +678,80 @@ def _spawn_into(rdir: Path, cmd: str, cwd: str | None, name: str, run_id: str) -
         meta["result"] = "success"
     _atomic_write_json(meta_path, meta)
 
-    os._exit(0)
+
+# Windows: how long the caller waits for the detached supervisor to report
+# the command's PID. Longer than POSIX's 2s: a fresh Python plus the shell
+# take ~0.5-1s to start, and the WMI fallback adds PowerShell's start-up.
+WIN_PID_WAIT_SEC = 15.0
+
+
+def _spawn_into_windows(rdir: Path, cmd: str, cwd: str | None, name: str, run_id: str) -> int:
+    """Windows counterpart of the double fork: start a detached supervisor
+    (`runner_core.py _supervise`) that escapes the agent's Job Object, runs
+    the command, captures its output, and records the result. See
+    runner_win.py for the mechanism and its fallbacks."""
+    pid_path = rdir / FILE_PID
+    mode = _win.launch_supervisor(Path(__file__).resolve(), rdir, cmd, cwd, name, run_id)
+    meta = _read_json(rdir / FILE_META) or {}
+    meta["detach"] = mode
+    _atomic_write_json(rdir / FILE_META, meta)
+    deadline = time.time() + WIN_PID_WAIT_SEC
+    while time.time() < deadline:
+        if pid_path.exists():
+            break
+        time.sleep(0.05)
+    try:
+        return int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return -1
+
+
+def cmd_supervise(args: argparse.Namespace) -> int:
+    """Internal (Windows): the detached half of a spawn. Runs in its own
+    process outside the agent's job, joins a per-run Job Object so a kill
+    takes the whole tree, runs the command through the resolved shell with
+    both streams pumped live into the logs, then finalizes meta.json."""
+    rdir = Path(args.run_dir)
+    meta_path = rdir / FILE_META
+    stdout_path = rdir / FILE_STDOUT
+    stderr_path = rdir / FILE_STDERR
+    pid_path = rdir / FILE_PID
+    spec = _win.read_spec(rdir)
+    run_id = spec["runId"]
+
+    env = dict(spec.get("env") or os.environ)
+    env["RUNNER_RUN_ID"] = run_id
+    env["RUNNER_RUN_ROOT"] = str(rdir)
+    # Pipes, not ptys: ask the common runtimes to flush per line, and give
+    # width-aware tools the same 200 columns the POSIX pty gets.
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("COLUMNS", "200")
+
+    job_name = f"Local\\runner-mcp-{run_id}-{os.getpid()}"
+    job = _win.create_own_job(job_name)
+    kind, exe = _win.resolve_shell()
+    meta = _read_json(meta_path) or {}
+    meta["supervisorPid"] = os.getpid()
+    meta["jobName"] = job_name if job else None
+    meta["shell"] = kind
+    meta["shellPath"] = exe
+    _atomic_write_json(meta_path, meta)
+
+    def on_started(proc) -> None:
+        m = _read_json(meta_path) or meta
+        m["pid"] = proc.pid
+        m["pidCreatedAt"] = _win.process_create_time(proc.pid)
+        m["state"] = "running"
+        _atomic_write_json(meta_path, m)
+        pid_path.write_text(str(proc.pid))
+
+    rc = _win.run_child(_win.shell_argv(kind, exe, spec["cmd"]), spec.get("cwd"), env,
+                        stdout_path, stderr_path, on_started)
+    if not pid_path.exists():
+        # The command never started; give the caller something to read.
+        pid_path.write_text("0")
+    _finalize_run(meta_path, stdout_path, rc, _read_json(meta_path) or meta)
+    return 0
 
 
 # Blocking-mode wait: 540s (9 min) for ALL blocking runs (sub-agent
@@ -813,15 +928,11 @@ def cmd_restart(args: argparse.Namespace) -> int:
     # Kill existing PID group if alive
     pid = meta.get("pid", 0) or 0
     killed = False
-    if pid > 0 and _process_alive(pid):
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-            killed = True
-        except (ProcessLookupError, PermissionError):
-            pass
+    if pid > 0 and _process_alive(pid, meta.get("pidCreatedAt")):
+        killed = _kill_process_tree(meta)
         # Brief wait for OS reap
         for _ in range(20):
-            if not _process_alive(pid):
+            if not _process_alive(pid, meta.get("pidCreatedAt")):
                 break
             time.sleep(0.05)
 
@@ -2132,13 +2243,17 @@ def build_sections(events: list[ParsedEvent]) -> list[Section]:
 # Run state synthesis
 # -----------------------------------------------------------------------------
 
-def _process_alive(pid: int) -> bool:
+def _process_alive(pid: int, created: int | None = None) -> bool:
     """Return True if a process with this PID exists.
 
-    Uses kill(pid, 0) which sends no signal but checks for existence.
+    Uses kill(pid, 0) which sends no signal but checks for existence. On
+    Windows os.kill(pid, 0) would TERMINATE the process, so runner_win asks
+    the OS instead (and, given `created`, rejects a reused PID).
     """
     if pid <= 0:
         return False
+    if IS_WINDOWS:
+        return _win.process_alive(pid, created)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -2163,7 +2278,7 @@ def synthesize_run_state(meta: dict[str, Any], sections: list[Section]) -> dict[
     ended_at = meta.get("endedAt")
 
     # Detect crash: meta thinks running but PID is gone
-    if state == "running" and pid > 0 and not _process_alive(pid):
+    if state == "running" and pid > 0 and not _process_alive(pid, meta.get("pidCreatedAt")):
         state = "exited"
         # If meta wasn't updated, exit code is unknown; signal -1
         if exit_code is None:
@@ -3577,7 +3692,7 @@ def _reconcile_running_meta(d: Path, meta: dict[str, Any]) -> dict[str, Any]:
     if meta.get("state") != "running":
         return meta
     pid = meta.get("pid", 0) or 0
-    if pid > 0 and _process_alive(pid):
+    if pid > 0 and _process_alive(pid, meta.get("pidCreatedAt")):
         return meta
     meta = dict(meta)
     meta["state"] = "exited"
@@ -3764,6 +3879,19 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _kill_process_tree(meta: dict[str, Any]) -> bool:
+    """SIGKILL the run's process group (POSIX) or terminate its Job Object
+    (Windows). Returns True if something was signalled."""
+    pid = meta.get("pid", 0) or 0
+    if IS_WINDOWS:
+        return _win.kill_tree(meta)
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
 def _kill_run_pgroup(rdir: Path, meta: dict[str, Any]) -> dict[str, Any]:
     """SIGKILL a run's process group and mark meta as exited.
 
@@ -3772,13 +3900,15 @@ def _kill_run_pgroup(rdir: Path, meta: dict[str, Any]) -> dict[str, Any]:
     by the poll loop's interrupt-cleanup path.
     """
     pid = meta.get("pid", 0) or 0
-    if pid <= 0 or not _process_alive(pid):
+    if pid <= 0 or not _process_alive(pid, meta.get("pidCreatedAt")):
         return meta
-    try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+    # Record the kill BEFORE signalling so the run's own finalizer (the
+    # Windows supervisor, if it outlives the signal) keeps this record.
     killed_at = int(time.time())
+    pre = dict(meta)
+    pre["killedAt"] = killed_at
+    _atomic_write_json(rdir / FILE_META, pre)
+    _kill_process_tree(meta)
     meta = dict(meta)
     meta["killedAt"] = killed_at
     meta["state"] = "exited"
@@ -3799,7 +3929,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
         print(json.dumps({"error": f"run {args.run_id} has no meta.json"}), file=sys.stderr)
         return 1
     pid = meta.get("pid", 0) or 0
-    if pid <= 0 or not _process_alive(pid):
+    if pid <= 0 or not _process_alive(pid, meta.get("pidCreatedAt")):
         response: dict[str, Any] = {
             "runId": args.run_id,
             "killed": False,
@@ -4813,13 +4943,10 @@ def cmd_agent(args: argparse.Namespace) -> int:
         # Kill any prior turn's process group (defensive; agent turns are
         # short, but a previous turn might still be wrapping up).
         pid = meta.get("pid", 0) or 0
-        if pid > 0 and _process_alive(pid):
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+        if pid > 0 and _process_alive(pid, meta.get("pidCreatedAt")):
+            _kill_process_tree(meta)
             for _ in range(20):
-                if not _process_alive(pid):
+                if not _process_alive(pid, meta.get("pidCreatedAt")):
                     break
                 time.sleep(0.05)
         # Archive previous prompt so a sequence is preserved for future
@@ -5304,6 +5431,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("verb")
     p.add_argument("fields", nargs="*")
     p.set_defaults(func=cmd_emit)
+
+    # _supervise (internal, Windows): the detached half of a spawn
+    p = sub.add_parser("_supervise", help=argparse.SUPPRESS)
+    p.add_argument("--run-dir", required=True)
+    p.set_defaults(func=cmd_supervise)
 
     # agent (sub-agent conversations via research_and_code_assistant_agent)
     p = sub.add_parser(
