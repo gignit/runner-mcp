@@ -40,23 +40,35 @@ _runnerlog_cli() {
     return 1
 }
 
+# Run the CLI. On Windows (Git Bash / MSYS / Cygwin) the shebang's python3
+# is often the Microsoft Store stub, so run the script with the Python that
+# runner itself uses (runner exports it as RUNNER_PYTHON to every run).
+_runnerlog() {
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)
+            "${RUNNER_PYTHON:-python}" "${BASH_SOURCE[0]%/*}/runnerlog" "$@" ;;
+        *)
+            "$(_runnerlog_cli)" "$@" ;;
+    esac
+}
+
 runnerlog_section_start() {
-    "$(_runnerlog_cli)" section_start "$@"
+    _runnerlog section_start "$@"
 }
 
 runnerlog_section_end() {
-    "$(_runnerlog_cli)" section_end "$@"
+    _runnerlog section_end "$@"
 }
 
 runnerlog_event() {
-    "$(_runnerlog_cli)" event "$@"
+    _runnerlog event "$@"
 }
 
 runnerlog_metric() {
-    "$(_runnerlog_cli)" metric "$@"
+    _runnerlog metric "$@"
 }
 
 runnerlog_fail() {
-    "$(_runnerlog_cli)" fail "$@"
+    _runnerlog fail "$@"
     exit 1
 }

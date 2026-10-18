@@ -726,6 +726,9 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     # width-aware tools the same 200 columns the POSIX pty gets.
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("COLUMNS", "200")
+    # The interpreter runner runs on, for runnerlog.sh and scripts (python3
+    # on Windows is often the Store stub).
+    env.setdefault("RUNNER_PYTHON", sys.executable)
 
     job_name = f"Local\\runner-mcp-{run_id}-{os.getpid()}"
     job = _win.create_own_job(job_name)

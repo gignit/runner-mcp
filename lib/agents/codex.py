@@ -21,7 +21,10 @@ from typing import Any
 
 from .opencode import (
     _current_turn_byte_bounds,
+    _exe,
     _output_line_count,
+    _python_sh,
+    _sh_path,
     _sh_quote,
     _tool_one_liner,
 )
@@ -134,7 +137,7 @@ def find_session(session_id: str, cwd: str | None = None) -> dict[str, Any] | No
 def _catalog() -> list[dict[str, Any]]:
     try:
         proc = subprocess.run(
-            ["codex", "debug", "models"],
+            [_exe("codex"), "debug", "models"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -208,8 +211,8 @@ def build_cmd(
         parts.append("-")
     return (
         " ".join(parts)
-        + f" < {_sh_quote(str(prompt_path))}"
-        + f" | python3 {_sh_quote(str(_RENDER_SCRIPT))}"
+        + f" < {_sh_path(prompt_path)}"
+        + f" | {_python_sh()} {_sh_path(_RENDER_SCRIPT)}"
     )
 
 

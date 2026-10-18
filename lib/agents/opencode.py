@@ -32,7 +32,10 @@ just return what we found.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +67,7 @@ def list_models(provider: str) -> list[str]:
         return []
     try:
         proc = subprocess.run(
-            ["opencode", "models", provider],
+            [_exe("opencode"), "models", provider],
             capture_output=True,
             text=True,
             timeout=30,
@@ -93,7 +96,7 @@ def available_models() -> list[dict[str, Any]]:
     """
     try:
         proc = subprocess.run(
-            ["opencode", "models"],
+            [_exe("opencode"), "models"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -183,8 +186,8 @@ def build_cmd(prompt_path: Path, session_id: str | None, model: str | None = Non
     model_flag = f"-m {_sh_quote(model)} " if model else ""
     return (
         f"opencode run --format json {model_flag}{session_flag}"
-        f"< {_sh_quote(str(prompt_path))} "
-        f"| python3 {_sh_quote(str(_RENDER_SCRIPT))}"
+        f"< {_sh_path(prompt_path)} "
+        f"| {_python_sh()} {_sh_path(_RENDER_SCRIPT)}"
     )
 
 
@@ -657,6 +660,27 @@ def _output_line_count(output: Any) -> int | None:
             return 0
         return output.count("\n") + (0 if output.endswith("\n") else 1)
     return None
+
+
+def _sh_path(p) -> str:
+    """Quote a filesystem path for bash. Forward slashes, so Git Bash on
+    Windows reads C:/... the same as a POSIX path."""
+    return _sh_quote(Path(p).as_posix())
+
+
+def _python_sh() -> str:
+    """The Python that runs the renderers, as a bash word. `python3` on
+    macOS/Linux; on Windows `python3` is often the Store stub, so use the
+    interpreter running runner itself."""
+    if os.name == "nt":
+        return _sh_path(sys.executable)
+    return "python3"
+
+
+def _exe(name: str) -> str:
+    """Resolve a backend CLI for subprocess. On Windows npm installs them as
+    .cmd shims, which CreateProcess only finds by full path."""
+    return shutil.which(name) or name
 
 
 def _sh_quote(s: str) -> str:
