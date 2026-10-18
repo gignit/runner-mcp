@@ -11,20 +11,12 @@ import (
 )
 
 // dataHome is the root the installer puts runner-mcp under: $XDG_DATA_HOME
-// when set, else ~/.local/share (macOS/Linux) or %LOCALAPPDATA% (Windows).
-// runner_core.py and the MCP server resolve the same path.
+// when set, else ~/.local/share on every platform (on Windows too: the
+// Microsoft Store Python virtualizes %LOCALAPPDATA%). runner_core.py and the
+// MCP server resolve the same path.
 func dataHome(home string) string {
 	if x := os.Getenv("XDG_DATA_HOME"); x != "" {
 		return x
-	}
-	if runtime.GOOS == "windows" {
-		if la := os.Getenv("LOCALAPPDATA"); la != "" {
-			return la
-		}
-		if home != "" {
-			return filepath.Join(home, "AppData", "Local")
-		}
-		return ""
 	}
 	if home == "" {
 		return ""

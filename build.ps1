@@ -80,21 +80,21 @@ if (-not ($Stage -or $Install)) { return }
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 foreach ($p in $WinPlatforms) {
     $stageRoot = Join-Path $DistDir "stage-$p"
-    $stage = Join-Path $stageRoot $Tool
+    $stageDir = Join-Path $stageRoot $Tool
     if (Test-Path $stageRoot) { Remove-Item $stageRoot -Recurse -Force }
-    foreach ($d in @("core", "lib", "docs", "mcp", "bin")) { New-Item -ItemType Directory -Force -Path (Join-Path $stage $d) | Out-Null }
-    Copy-Item (Join-Path $Root "core\*") (Join-Path $stage "core") -Recurse
-    Copy-Item (Join-Path $Root "lib\*") (Join-Path $stage "lib") -Recurse
-    Copy-Item (Join-Path $Root "docs\*") (Join-Path $stage "docs") -Recurse
-    Copy-Item (Join-Path $Root "LICENSE") $stage
-    Copy-Item (Join-Path $Root "mcp\dist") (Join-Path $stage "mcp\dist") -Recurse
-    Copy-Item (Join-Path $Root "mcp\node_modules") (Join-Path $stage "mcp\node_modules") -Recurse
-    Copy-Item (Join-Path $Root "mcp\package.json") (Join-Path $stage "mcp")
-    Copy-Item (Join-Path $BinDir "runner-cli-$p.exe") (Join-Path $stage "bin\runner-cli.exe")
-    Get-ChildItem $stage -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
+    foreach ($d in @("core", "lib", "docs", "mcp", "bin")) { New-Item -ItemType Directory -Force -Path (Join-Path $stageDir $d) | Out-Null }
+    Copy-Item (Join-Path $Root "core\*") (Join-Path $stageDir "core") -Recurse
+    Copy-Item (Join-Path $Root "lib\*") (Join-Path $stageDir "lib") -Recurse
+    Copy-Item (Join-Path $Root "docs\*") (Join-Path $stageDir "docs") -Recurse
+    Copy-Item (Join-Path $Root "LICENSE") $stageDir
+    Copy-Item (Join-Path $Root "mcp\dist") (Join-Path $stageDir "mcp\dist") -Recurse
+    Copy-Item (Join-Path $Root "mcp\node_modules") (Join-Path $stageDir "mcp\node_modules") -Recurse
+    Copy-Item (Join-Path $Root "mcp\package.json") (Join-Path $stageDir "mcp")
+    Copy-Item (Join-Path $BinDir "runner-cli-$p.exe") (Join-Path $stageDir "bin\runner-cli.exe")
+    Get-ChildItem $stageDir -Recurse -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
     $zip = Join-Path $DistDir "$Tool-$Version-$p.zip"
     if (Test-Path $zip) { Remove-Item $zip -Force }
-    Compress-Archive -Path $stage -DestinationPath $zip
+    Compress-Archive -Path $stageDir -DestinationPath $zip
     Remove-Item $stageRoot -Recurse -Force
     Ok "Staged $zip"
 }

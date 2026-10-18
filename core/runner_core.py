@@ -98,19 +98,16 @@ WIRE_PREFIX = "::run:: "
 #
 # The global fallback (used when the cwd is not inside a git repo) follows
 # the XDG Base Directory spec: $XDG_DATA_HOME/runner-mcp, defaulting to
-# ~/.local/share/runner-mcp on Linux and macOS, %LOCALAPPDATA%/runner-mcp
-# on Windows (XDG_DATA_HOME still wins when set).
+# ~/.local/share/runner-mcp on every platform, Windows included. Not
+# %LOCALAPPDATA% on Windows: the Microsoft Store Python virtualizes AppData,
+# so it would not see an install (or an index) written there by anything
+# else, and runs would vanish between the MCP server and runner-cli.
 RUNNER_DIRNAME = ".runner"
 
 
 def _xdg_data_home() -> Path:
     x = os.environ.get("XDG_DATA_HOME", "").strip()
-    if x:
-        return Path(x)
-    if IS_WINDOWS:
-        la = os.environ.get("LOCALAPPDATA", "").strip()
-        return Path(la) if la else (Path.home() / "AppData" / "Local")
-    return Path.home() / ".local" / "share"
+    return Path(x) if x else (Path.home() / ".local" / "share")
 
 
 RUNNER_GLOBAL = _xdg_data_home() / "runner-mcp"
@@ -4595,7 +4592,7 @@ def cmd_helpers(args: argparse.Namespace) -> int:
         response["bash"]["sourceLine"] = f'source "{(lib / "runnerlog.sh").as_posix()}"'
         response["bash"]["snippet"] = _BASH_SNIPPET.replace("@LIB_SH@", (lib / "runnerlog.sh").as_posix())
         response["cli"]["absolutePath"] = str(lib / "runnerlog.cmd")
-        response["cli"]["note"] = "On PATH after install.ps1 (runnerlog.cmd in %LOCALAPPDATA%\\runner-mcp\\bin)."
+        response["cli"]["note"] = "On PATH after install.ps1 (runnerlog.cmd in ~/.local/bin)."
         response["powershell"] = {
             "command": "runnerlog",
             "absolutePath": str(lib / "runnerlog.cmd"),

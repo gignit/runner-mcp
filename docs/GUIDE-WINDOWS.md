@@ -84,7 +84,7 @@ is set so width-aware tools don't wrap at 80.
 
 ## Where things live
 
-- Install: `%LOCALAPPDATA%\runner-mcp` (`runner-cli.exe` and `runnerlog.cmd`
-  in its `bin\`, which is on the user PATH).
+- Install: `~\.local\share\runner-mcp`, the same as macOS/Linux
+  (`runner-cli.exe` and `runnerlog.cmd` in `~\.local\bin`, on the user PATH).
 - Run data: `<git-root>\.runner\<runId>\`, same as everywhere. Runs
   started outside a git repo go under the install dir.

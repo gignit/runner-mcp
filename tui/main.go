@@ -2503,7 +2503,7 @@ func findCorePath() (string, error) {
 		home = usr.HomeDir
 	}
 
-	// Data dir (honors $XDG_DATA_HOME; %LOCALAPPDATA% on Windows), where the installer places the
+	// XDG data dir (honors $XDG_DATA_HOME), where the installer places the
 	// payload: <dataHome>/runner-mcp/core/runner_core.py
 	dataHome := dataHome(home)
 

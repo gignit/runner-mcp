@@ -74,7 +74,8 @@ import { homedir } from "os";
 
 // The XDG data directory where the installer lays down the payload:
 //   $XDG_DATA_HOME/runner-mcp/  (default ~/.local/share/runner-mcp/ on
-//   Linux and macOS, %LOCALAPPDATA%\runner-mcp\ on Windows). We honor
+//   every platform, Windows included: the Microsoft Store Python virtualizes
+//   %LOCALAPPDATA%, so it would not see an install there). We honor
 //   $XDG_DATA_HOME when set so the path is relocatable, matching modern CLI
 //   conventions. runner_core.py and runner-cli resolve the same path.
 const IS_WINDOWS = process.platform === "win32";
@@ -82,10 +83,6 @@ const IS_WINDOWS = process.platform === "win32";
 function xdgDataHome(): string {
   const x = process.env.XDG_DATA_HOME;
   if (x && x.trim()) return x;
-  if (IS_WINDOWS) {
-    const la = process.env.LOCALAPPDATA;
-    return la && la.trim() ? la : join(homedir(), "AppData", "Local");
-  }
   return join(homedir(), ".local", "share");
 }
 

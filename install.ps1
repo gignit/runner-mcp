@@ -12,12 +12,15 @@
 #   1. Detects the architecture and downloads runner-mcp-<version>-windows-<arch>.zip
 #      from GitHub Releases (SHA-256 checked against SHA256SUMS), or uses a local
 #      artifact dir when RUNNER_MCP_DIST is set (how build.ps1 -Install tests it).
-#   2. Installs the payload into %LOCALAPPDATA%\runner-mcp (XDG_DATA_HOME\runner-mcp
-#      when that is set), replacing only the payload folders: the global run index
-#      and any runs stored there are kept.
+#   2. Installs the payload into ~\.local\share\runner-mcp (XDG_DATA_HOME\runner-mcp
+#      when that is set) -- the same layout as macOS/Linux, and deliberately not
+#      %LOCALAPPDATA%: the Microsoft Store Python virtualizes AppData and would not
+#      see files put there. Only the payload folders are replaced, so the global run
+#      index and any runs stored there are kept.
 #   3. Records the verified Python 3 in python.path (python3 on Windows is often the
-#      Microsoft Store stub) and puts runner-cli.exe + runnerlog.cmd in
-#      %LOCALAPPDATA%\runner-mcp\bin, added to the user PATH.
+#      Microsoft Store stub) and puts runner-cli.exe + runnerlog.cmd in ~\.local\bin
+#      (where Claude Code's own Windows installer puts claude.exe), adding it to the
+#      user PATH if it is not there.
 #   4. Registers the MCP server with the agents it finds (Claude Code, Codex,
 #      opencode, Grok, VS Code / VS Code Insiders / Cursor): add if missing, repair
 #      if the registered server script no longer exists, otherwise leave it alone.
@@ -50,9 +53,11 @@ function Die($m)  { Write-Host "x $m" -ForegroundColor Red; throw $m }
 function Have($name) { [bool](Get-Command $name -ErrorAction SilentlyContinue) }
 
 # --- Paths -------------------------------------------------------------------
-$DataHome = if ($env:XDG_DATA_HOME) { $env:XDG_DATA_HOME } elseif ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME "AppData\Local" }
+$DataHome = if ($env:XDG_DATA_HOME) { $env:XDG_DATA_HOME } else { Join-Path $HOME ".local\share" }
 $InstallDir = Join-Path $DataHome $Tool
-$BinDir = Join-Path $InstallDir "bin"
+$PayloadBin = Join-Path $InstallDir "bin"
+$BinDir = Join-Path $HOME ".local\bin"
+$PathMarker = Join-Path $InstallDir "added-to-path"
 $McpEntry = Join-Path $InstallDir "mcp\dist\index.js"
 $PayloadParts = @("core", "lib", "docs", "mcp", "bin", "LICENSE")
 
@@ -167,6 +172,10 @@ function Get-Payload($platform, $work) {
 # Replace only the payload folders, so the global run index and runs stored in
 # the install dir survive an upgrade. A running runner-cli.exe cannot be
 # overwritten on Windows, but it can be renamed: move it aside first.
+function Move-Aside($exe) {
+    if (Test-Path $exe) { Rename-Item $exe ((Split-Path $exe -Leaf) + ".old-" + [DateTime]::Now.Ticks) }
+}
+
 function Install-Payload($zipPath, $work) {
     Step "Extracting payload"
     $stage = Join-Path $work "stage"
@@ -174,9 +183,8 @@ function Install-Payload($zipPath, $work) {
     $root = Join-Path $stage $Tool
     if (-not (Test-Path $root)) { Die "unexpected archive layout (no $Tool\ folder)" }
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    Get-ChildItem $InstallDir -Recurse -Filter "*.old-*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-    $exe = Join-Path $BinDir "runner-cli.exe"
-    if (Test-Path $exe) { Rename-Item $exe ("runner-cli.exe.old-" + [DateTime]::Now.Ticks) }
+    Get-ChildItem $PayloadBin -Filter "*.old-*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Move-Aside (Join-Path $PayloadBin "runner-cli.exe")
     foreach ($part in $PayloadParts) {
         $src = Join-Path $root $part
         $dst = Join-Path $InstallDir $part
@@ -194,15 +202,24 @@ function Install-Payload($zipPath, $work) {
     Ok "Installed to $InstallDir"
 }
 
+# runner-cli.exe is copied (Windows symlinks need admin or Developer Mode);
+# runnerlog.cmd is a shim that calls the installed lib\runnerlog.cmd.
 function Install-Clis {
     Step "Putting the CLIs on PATH ($BinDir)"
     New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-    $shim = "@echo off`r`n""%~dp0..\lib\runnerlog.cmd"" %*`r`nexit /b %ERRORLEVEL%`r`n"
+    Get-ChildItem $BinDir -Filter "runner-cli.exe.old-*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    $exe = Join-Path $BinDir "runner-cli.exe"
+    Move-Aside $exe
+    Copy-Item (Join-Path $PayloadBin "runner-cli.exe") $exe
+    Ok "Copied $exe"
+    $shim = "@echo off`r`nrem runner-mcp shim`r`n""$InstallDir\lib\runnerlog.cmd"" %*`r`nexit /b %ERRORLEVEL%`r`n"
     [IO.File]::WriteAllText((Join-Path $BinDir "runnerlog.cmd"), $shim)
+    Ok "Wrote $(Join-Path $BinDir 'runnerlog.cmd')"
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $parts = @(); if ($userPath) { $parts = $userPath.Split(';') | Where-Object { $_ } }
     if ($parts -notcontains $BinDir) {
         [Environment]::SetEnvironmentVariable("Path", (($parts + $BinDir) -join ';'), "User")
+        Set-Content -Path $PathMarker -Value $BinDir -Encoding ASCII
         Ok "Added $BinDir to the user PATH (open a new terminal to pick it up)"
     } else { Ok "$BinDir already on the user PATH" }
     if (-not (($env:Path.Split(';')) -contains $BinDir)) { $env:Path = "$env:Path;$BinDir" }
@@ -399,9 +416,19 @@ function Register-Agents {
 
 # --- Uninstall ---------------------------------------------------------------
 # Removes exactly what was installed: the install dir (payload, global index,
-# global-fallback runs), the bin dir on the user PATH, and the runner MCP
-# registration from every agent. Never touches per-project .runner\ run data.
-# Dry run unless -Yes.
+# global-fallback runs), runner-cli.exe / runnerlog.cmd in ~\.local\bin (only if
+# they are ours), ~\.local\bin on the user PATH (only if the installer added it),
+# and the runner MCP registration from every agent. Never touches per-project
+# .runner\ run data. Dry run unless -Yes.
+function Test-OursInBin($name) {
+    $p = Join-Path $BinDir $name
+    if (-not (Test-Path $p)) { return $false }
+    if ($name -eq "runnerlog.cmd") { return [bool](Select-String -Path $p -SimpleMatch "rem runner-mcp shim" -Quiet) }
+    $mine = Join-Path $PayloadBin $name
+    if (-not (Test-Path $mine)) { return $false }
+    return (Get-FileHash $p).Hash -eq (Get-FileHash $mine).Hash
+}
+
 function Invoke-Uninstall {
     Write-Host ""
     Step "Uninstalling $Tool"
@@ -409,6 +436,14 @@ function Invoke-Uninstall {
     Write-Host ""
     $node = Get-Command node -ErrorAction SilentlyContinue
     $script:NodeBin = if ($node) { $node.Source } else { $null }
+
+    foreach ($name in @("runner-cli.exe", "runnerlog.cmd")) {
+        $p = Join-Path $BinDir $name
+        if (Test-OursInBin $name) {
+            if ($Yes) { Remove-Item $p -Force; Ok "removed $p" } else { Info "would remove $p" }
+        } elseif (Test-Path $p) { Warn "$p is not from this install -- leaving it alone" }
+    }
+    $addedPath = Test-Path $PathMarker
 
     if (Test-Path $InstallDir) {
         if ($Yes) {
@@ -418,7 +453,7 @@ function Invoke-Uninstall {
     } else { Info "install dir not found: $InstallDir" }
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($userPath -and ($userPath.Split(';') -contains $BinDir)) {
+    if ($addedPath -and $userPath -and ($userPath.Split(';') -contains $BinDir)) {
         if ($Yes) {
             [Environment]::SetEnvironmentVariable("Path", (($userPath.Split(';') | Where-Object { $_ -and $_ -ne $BinDir }) -join ';'), "User")
             Ok "removed $BinDir from the user PATH"
