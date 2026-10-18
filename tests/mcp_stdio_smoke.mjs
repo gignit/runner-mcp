@@ -37,7 +37,8 @@ function rpc(method, params) {
 async function call(name, args) {
   const r = await rpc("tools/call", { name, arguments: args });
   if (r.error) throw new Error(`${name}: ${JSON.stringify(r.error)}`);
-  const text = r.result.content.map((c) => c.text).join("");
+  // The first block is the payload; some tools append a reminder block.
+  const text = r.result.content[0].text;
   try { return JSON.parse(text); } catch { return text; }
 }
 let failures = 0;
@@ -78,8 +79,8 @@ check("blocking run: stderr separate", JSON.stringify(one.stderr || "").includes
 const gated = await call("runner_start", { cmd: "echo a && echo b" });
 check("chain is gated, not run", JSON.stringify(gated).includes("&&") && !gated.runId, JSON.stringify(gated).slice(0, 120));
 
-const ps = await call("runner_start", { cmd: "powershell -NoProfile -Command \"Write-Output ('ps ' + $PSVersionTable.PSVersion.Major)\"" });
-check("PowerShell as a single command", JSON.stringify(ps).includes("ps 5") || JSON.stringify(ps).includes("ps 7"), JSON.stringify(ps.stdout));
+const ps = await call("runner_start", { cmd: "powershell -NoProfile -Command 'Write-Output PS$($PSVersionTable.PSVersion.Major)'" });
+check("PowerShell as a single command", /PS[57]/.test(JSON.stringify(ps.stdout)), JSON.stringify(ps.stdout));
 
 const svc = await call("runner_start", { cmd: "node srv.js", name: "svc", blocking: false });
 const w = await call("runner_wait_for", { runId: svc.runId, pattern: "running on port" });
