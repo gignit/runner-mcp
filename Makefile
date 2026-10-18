@@ -3,12 +3,13 @@
 #   make build     Compile for THIS machine (TS -> mcp/dist, Go TUI -> bin/).
 #   make install   Build, stage a local release tarball, then run install.sh
 #                  against it (dogfoods the exact installer users run).
-#   make release   Cross-compile all targets, bundle tarballs + SHA256SUMS,
-#                  stamp install.sh with the version, and publish a GitHub
-#                  Release (gh release create). This is the only path that
-#                  touches GitHub.
+#   make release   Cross-compile all targets, bundle tarballs (zips for
+#                  Windows) + SHA256SUMS, stamp install.sh and install.ps1
+#                  with the version, and publish a GitHub Release (gh release
+#                  create). This is the only path that touches GitHub.
 #
-# POSIX-friendly; works on macOS (BSD tools) and Linux (GNU tools).
+# POSIX-friendly; works on macOS (BSD tools) and Linux (GNU tools). On
+# Windows, build and test with build.ps1 instead.
 
 SHELL := /bin/sh
 
@@ -24,13 +25,14 @@ DIST_DIR    := $(ROOT)/dist
 
 # Cross-compile matrix for `make release`.
 PLATFORMS   := darwin-amd64 darwin-arm64 linux-amd64 linux-arm64
+WIN_PLATFORMS := windows-amd64 windows-arm64
 
 # This machine's platform (for `make install`).
 HOST_OS     := $(shell uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/darwin/;s/linux/linux/')
 HOST_ARCH   := $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/;s/arm64/arm64/')
 HOST_PLATFORM := $(HOST_OS)-$(HOST_ARCH)
 
-.PHONY: all build build-mcp build-tui clean install release stage-host help check-deps
+.PHONY: all build build-mcp build-tui clean install release stage-host help check-deps _stage _stage_win
 
 all: build
 
@@ -96,6 +98,29 @@ _stage:
 	rm -rf "$(DIST_DIR)/stage-$(PLATFORM)"; \
 	echo "+ Staged $(DIST_DIR)/$(TOOL)-$(VERSION)-$(PLATFORM).tar.gz"
 
+# Internal: the Windows payload -- the same tree as _stage, runner-cli.exe,
+# zipped (install.ps1 extracts it with Expand-Archive). Zipped with Python's
+# zipfile (python3 is a runtime requirement anyway), so no zip(1) needed.
+_stage_win:
+	@test -n "$(PLATFORM)" || { echo "x _stage_win requires PLATFORM=windows-arch"; exit 1; }
+	@stage="$(DIST_DIR)/stage-$(PLATFORM)/$(TOOL)"; \
+	rm -rf "$(DIST_DIR)/stage-$(PLATFORM)"; \
+	mkdir -p "$$stage/core" "$$stage/lib" "$$stage/docs" "$$stage/mcp" "$$stage/bin"; \
+	cp -R "$(ROOT)/core/." "$$stage/core/"; \
+	cp -R "$(ROOT)/lib/."  "$$stage/lib/"; \
+	cp -R "$(ROOT)/docs/." "$$stage/docs/"; \
+	cp "$(ROOT)/LICENSE" "$$stage/LICENSE"; \
+	cp -R "$(MCP_DIR)/dist" "$$stage/mcp/dist"; \
+	cp -R "$(MCP_DIR)/node_modules" "$$stage/mcp/node_modules"; \
+	cp "$(MCP_DIR)/package.json" "$$stage/mcp/"; \
+	cp "$(BIN_DIR)/runner-cli-$(PLATFORM).exe" "$$stage/bin/runner-cli.exe"; \
+	find "$$stage" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true; \
+	mkdir -p "$(DIST_DIR)"; \
+	rm -f "$(DIST_DIR)/$(TOOL)-$(VERSION)-$(PLATFORM).zip"; \
+	( cd "$(DIST_DIR)/stage-$(PLATFORM)" && python3 -m zipfile -c "$(DIST_DIR)/$(TOOL)-$(VERSION)-$(PLATFORM).zip" "$(TOOL)" ); \
+	rm -rf "$(DIST_DIR)/stage-$(PLATFORM)"; \
+	echo "+ Staged $(DIST_DIR)/$(TOOL)-$(VERSION)-$(PLATFORM).zip"
+
 # ---------------------------------------------------------------------------
 # Install (dogfood the real installer against a locally-built artifact)
 # ---------------------------------------------------------------------------
@@ -113,23 +138,30 @@ install: stage-host
 release: check-deps build-mcp
 	@echo "> Cross-compiling TUI for: $(PLATFORMS)"
 	@mkdir -p "$(BIN_DIR)" "$(DIST_DIR)"
-	@rm -f "$(DIST_DIR)"/*.tar.gz "$(DIST_DIR)/SHA256SUMS" 2>/dev/null || true
+	@rm -f "$(DIST_DIR)"/*.tar.gz "$(DIST_DIR)"/*.zip "$(DIST_DIR)/SHA256SUMS" 2>/dev/null || true
 	@for p in $(PLATFORMS); do \
 		os="$${p%-*}"; arch="$${p#*-}"; \
 		echo "  - $$p"; \
 		( cd "$(TUI_DIR)" && GOOS="$$os" GOARCH="$$arch" CGO_ENABLED=0 go build -o "$(BIN_DIR)/runner-cli-$$p" . ) || exit 1; \
 		$(MAKE) --no-print-directory _stage PLATFORM=$$p || exit 1; \
 	done
+	@for p in $(WIN_PLATFORMS); do \
+		os="$${p%-*}"; arch="$${p#*-}"; \
+		echo "  - $$p"; \
+		( cd "$(TUI_DIR)" && GOOS="$$os" GOARCH="$$arch" CGO_ENABLED=0 go build -o "$(BIN_DIR)/runner-cli-$$p.exe" . ) || exit 1; \
+		$(MAKE) --no-print-directory _stage_win PLATFORM=$$p || exit 1; \
+	done
 	@echo "> Generating SHA256SUMS"
-	@cd "$(DIST_DIR)" && ( command -v sha256sum >/dev/null 2>&1 && sha256sum *.tar.gz > SHA256SUMS || shasum -a 256 *.tar.gz > SHA256SUMS )
-	@echo "> Stamping install.sh with version $(VERSION)"
+	@cd "$(DIST_DIR)" && ( command -v sha256sum >/dev/null 2>&1 && sha256sum *.tar.gz *.zip > SHA256SUMS || shasum -a 256 *.tar.gz *.zip > SHA256SUMS )
+	@echo "> Stamping install.sh and install.ps1 with version $(VERSION)"
 	@sed 's/^RUNNER_MCP_VERSION="$${RUNNER_MCP_VERSION:-[0-9.]*}"/RUNNER_MCP_VERSION="$${RUNNER_MCP_VERSION:-$(VERSION)}"/' install.sh > "$(DIST_DIR)/install.sh"
 	@chmod +x "$(DIST_DIR)/install.sh"
+	@sed 's/} else { "[0-9.]*" })/} else { "$(VERSION)" })/' install.ps1 > "$(DIST_DIR)/install.ps1"
 	@echo "> Publishing GitHub Release v$(VERSION)"
 	@gh release view "v$(VERSION)" >/dev/null 2>&1 \
-		&& gh release upload "v$(VERSION)" "$(DIST_DIR)"/*.tar.gz "$(DIST_DIR)/SHA256SUMS" "$(DIST_DIR)/install.sh" --clobber \
-		|| gh release create "v$(VERSION)" "$(DIST_DIR)"/*.tar.gz "$(DIST_DIR)/SHA256SUMS" "$(DIST_DIR)/install.sh" \
-			--title "$(TOOL) v$(VERSION)" --notes "Release $(VERSION). Install: curl -fsSL https://github.com/$(REPO)/releases/download/v$(VERSION)/install.sh | sh"
+		&& gh release upload "v$(VERSION)" "$(DIST_DIR)"/*.tar.gz "$(DIST_DIR)"/*.zip "$(DIST_DIR)/SHA256SUMS" "$(DIST_DIR)/install.sh" "$(DIST_DIR)/install.ps1" --clobber \
+		|| gh release create "v$(VERSION)" "$(DIST_DIR)"/*.tar.gz "$(DIST_DIR)"/*.zip "$(DIST_DIR)/SHA256SUMS" "$(DIST_DIR)/install.sh" "$(DIST_DIR)/install.ps1" \
+			--title "$(TOOL) v$(VERSION)" --notes "Release $(VERSION). Install (macOS/Linux): curl -fsSL https://github.com/$(REPO)/releases/download/v$(VERSION)/install.sh | sh -- (Windows, PowerShell): irm https://github.com/$(REPO)/releases/download/v$(VERSION)/install.ps1 | iex"
 	@echo "+ Released v$(VERSION)"
 
 check-deps:
