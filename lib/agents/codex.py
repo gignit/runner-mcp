@@ -367,6 +367,12 @@ def _backend_error(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# A Codex tracing log line: "2026-10-18T16:14:13.322584Z ERROR rmcp::transport::worker: ..."
+_TRACING_LINE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s+[\w:.-]+:"
+)
+
+
 def _parse_events(rdir: Path) -> list[dict[str, Any]]:
     """Normalize the current turn's Codex JSONL events."""
     out: list[dict[str, Any]] = []
@@ -386,6 +392,17 @@ def _parse_events(rdir: Path) -> list[dict[str, Any]]:
                 try:
                     event = json.loads(raw)
                 except json.JSONDecodeError:
+                    log_line = _TRACING_LINE.match(raw)
+                    if log_line:
+                        # Codex's own diagnostic log (Rust tracing), e.g. an
+                        # MCP server or connector that failed to start or
+                        # needs a login. Codex drops it and runs the turn;
+                        # real turn failures arrive as JSON error /
+                        # turn.failed events. Keep WARN/ERROR lines visible
+                        # in backendErrors, never as an interrupt.
+                        if log_line.group(1) in ("WARN", "ERROR"):
+                            out.append({"kind": "backend_error", "text": raw[:240]})
+                        continue
                     lowered = raw.lower()
                     hard_error = any(
                         marker in lowered
