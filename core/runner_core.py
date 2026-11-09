@@ -4691,6 +4691,24 @@ def _find_run_wrapping_session(run_root: Path, runtime_name: str, session_id: st
     return None
 
 
+def _session_project_dir(runtime: Any, session_id: str | None, cwd: str | None) -> str | None:
+    """The directory a backend session belongs to, or None when unknown.
+
+    Used by continuation turns so they spawn where the session lives.
+    None (no session id yet, no find_session hook, session not found, or
+    lookup failure) leaves the caller's cwd in charge, as before.
+    """
+    finder = getattr(runtime, "find_session", None)
+    if not session_id or finder is None:
+        return None
+    try:
+        info = finder(session_id, cwd) or {}
+    except Exception:
+        return None
+    project_dir = info.get("projectDir")
+    return project_dir if isinstance(project_dir, str) and project_dir else None
+
+
 def _resolve_session_adoption(
     agents: Any,
     session_id: str,
@@ -4707,7 +4725,7 @@ def _resolve_session_adoption(
           claude/codex UUID). A runtime that doesn't claim the shape is
           skipped -- so e.g. an explicit --agent opencode with a UUID is
           refused up front instead of spawning a doomed turn.
-      find_session(s, cwd): on-disk verification (claude/codex). When the
+      find_session(s, cwd): on-disk verification (claude/codex/opencode). When the
           session belongs to a DIFFERENT project, the returned
           projectDir tells the caller to spawn the backend in that
           directory so a resumed agent turn retains its original project
@@ -4733,9 +4751,9 @@ def _resolve_session_adoption(
             continue
         finder = getattr(rt, "find_session", None)
         if finder is None:
-            # Shape claimed but no local existence check (opencode):
-            # remember as fallback; a verified match from another
-            # runtime wins over an unverified one.
+            # Shape claimed but no local existence check: remember as
+            # fallback; a verified match from another runtime wins over
+            # an unverified one.
             if unvalidated is None:
                 unvalidated = name
             continue
@@ -4958,6 +4976,19 @@ def cmd_agent(args: argparse.Namespace) -> int:
     )
     turn_count = int(meta.get("agentTurnCount", 0)) + 1
 
+    # The backend must run in its session's own directory on EVERY turn,
+    # not just the adopting one: the MCP layer always sends the caller's
+    # --cwd, which would otherwise pull a continued turn out of the
+    # session's project (opencode then emits no events at all; claude
+    # cannot resume). Adoption resolved the directory above. A
+    # continuation uses the directory an earlier turn persisted, or asks
+    # the backend (runs recorded before agentProjectDir existed).
+    agent_project_dir = adopt_cwd
+    if agent_project_dir is None and rdir is not None:
+        agent_project_dir = meta.get("agentProjectDir") or _session_project_dir(
+            runtime, backend_session_id,
+            getattr(args, "cwd", None) or meta.get("cwd"))
+
     if rdir is None:
         # Fresh conversation OR adoption (same scaffold path)
         run_id = gen_run_id()
@@ -5089,11 +5120,10 @@ def cmd_agent(args: argparse.Namespace) -> int:
         "name": name,
         "description": meta.get("description") or f"{runtime_name} sub-agent conversation",
         "cmd": cmd_to_run,
-        # adopt_cwd (cross-project backend adoption) outranks everything:
-        # the backend must run in the session's own project dir. It is
-        # persisted here so later turns of the adopted conversation
-        # inherit it via meta.get("cwd").
-        "cwd": (adopt_cwd or getattr(args, "cwd", None) or meta.get("cwd") or os.getcwd()),
+        # The session's own project dir outranks everything, including an
+        # explicit --cwd: the backend must run there on every turn.
+        "cwd": (agent_project_dir or getattr(args, "cwd", None)
+                or meta.get("cwd") or os.getcwd()),
         "startedAt": started_at,
         "endedAt": None,
         "exitCode": None,
@@ -5110,6 +5140,7 @@ def cmd_agent(args: argparse.Namespace) -> int:
         "blockingMode": True,
         "agentRuntime": runtime_name,
         "agentSessionId": backend_session_id,   # may be None on first turn
+        "agentProjectDir": agent_project_dir,   # None => caller's cwd
         "agentModel": model_for_turn,           # None => backend default
         "agentTurnCount": turn_count,
         "agentTurnCursors": turn_cursors,

@@ -49,10 +49,89 @@ def render_script_path() -> Path:
 
 
 def looks_like_session_id(s: str) -> bool:
-    """opencode session ids look like `ses_...`. Shape check only; there
-    is no cheap local existence check, so adoption is unvalidated and a
-    bad id surfaces as a 'Session not found' error in stderr.log."""
+    """opencode session ids look like `ses_...`. Shape check only -- use
+    find_session() to verify existence and learn the owning directory."""
     return bool(s) and s.startswith("ses_")
+
+
+# How long a read-only session lookup waits on a database another opencode
+# process is writing before giving up on that database.
+_SESSION_DB_TIMEOUT_SEC = 5.0
+
+
+def _session_databases() -> list[Path]:
+    """The opencode SQLite databases that may hold a session.
+
+    OPENCODE_DB names one database explicitly. Otherwise opencode keeps
+    opencode.db (plus opencode-<channel>.db for other release channels)
+    in its XDG data directory.
+    """
+    explicit = os.environ.get("OPENCODE_DB")
+    if explicit:
+        return [Path(explicit).expanduser()]
+    data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    data_dir = Path(data_home) / "opencode"
+    try:
+        return sorted(data_dir.glob("opencode*.db"))
+    except OSError:
+        return []
+
+
+def find_session(session_id: str, cwd: str | None = None) -> dict[str, Any] | None:
+    """Locate an opencode session and report which directory owns it.
+
+    `opencode run -s SID` must run in the session's own directory. Started
+    anywhere else, the turn still executes (in the session directory's
+    instance) but `--format json` emits no events on stdout, so runner
+    captures nothing and never sees the reply. The owning directory is
+    the `session.directory` column of opencode's database.
+
+    Returns None when a readable database exists and none of them holds
+    the session. Otherwise:
+      {
+        "projectDir":  str | None,  # directory to spawn opencode in
+        "sameProject": bool,        # projectDir == caller's cwd
+        "database":    str | None,  # the database that held the session
+      }
+    When no database can be read the session cannot be verified; the
+    result then has projectDir None and sameProject True so the caller
+    keeps its own cwd, and a bad id surfaces as opencode's own
+    'Session not found' error in stderr.log.
+    """
+    if not looks_like_session_id(session_id):
+        return None
+    import sqlite3
+
+    readable = False
+    for db in _session_databases():
+        if not db.is_file():
+            continue
+        try:
+            conn = sqlite3.connect(
+                f"{db.resolve().as_uri()}?mode=ro", uri=True,
+                timeout=_SESSION_DB_TIMEOUT_SEC)
+        except sqlite3.Error:
+            continue
+        try:
+            row = conn.execute(
+                "SELECT directory FROM session WHERE id = ?", (session_id,)
+            ).fetchone()
+        except sqlite3.Error:
+            continue
+        finally:
+            conn.close()
+        readable = True
+        if row is None:
+            continue
+        directory = row[0] if isinstance(row[0], str) and row[0] else None
+        same = bool(
+            cwd and directory
+            and str(Path(directory).resolve()) == str(Path(cwd).resolve())
+        )
+        return {"projectDir": directory, "sameProject": same, "database": str(db)}
+    if readable:
+        return None
+    return {"projectDir": None, "sameProject": True, "database": None}
 
 
 def list_models(provider: str) -> list[str]:
